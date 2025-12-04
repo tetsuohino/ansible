@@ -1,0 +1,87 @@
+---
+- name: Nginxコンテナの起動とステータス確認
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    container_name: nginx_web
+    nginx_port: 8080
+    retry_delay: 5    # リトライ間隔（秒）
+    retry_count: 12   # 最大試行回数 (合計 60秒待機)
+    # nginx_url変数はタスク内で動的に設定するため削除
+
+  tasks:
+    # 0. ホストの外部IPアドレスを取得
+    - name: 外部IPアドレスを取得
+      ansible.builtin.uri:
+        url: https://icanhazip.com/ # 外部サービスでパブリックIPを取得
+        method: GET
+        return_content: true
+      register: external_ip_result
+      run_once: true
+
+    - name: 外部URL変数を設定
+      ansible.builtin.set_fact:
+        # 取得した結果 (content) をIPアドレスとして利用し、改行コードなどを除去
+        external_ip: "{{ external_ip_result.content | trim }}"
+        # 外部アクセス用のURLを動的に設定
+        nginx_url: "http://{{ external_ip_result.content | trim }}:{{ nginx_port }}"
+
+    - name: 確認用デバッグ出力
+      ansible.builtin.debug:
+        msg: "コンテナの外部URL: {{ nginx_url }}"
+
+    # 1. 既存コンテナの削除と新規起動 (Port 8080:80)
+    - name: 既存コンテナを強制削除 (実行前クリーンアップ)
+      community.docker.docker_container:
+        name: "{{ container_name }}"
+        state: absent
+        force_kill: true
+
+    - name: Nginxコンテナをポートフォワード付きで起動
+      community.docker.docker_container:
+        name: "{{ container_name }}"
+        image: ubuntu/nginx:1.18-20.04_beta
+        # Dockerコンテナのポートバインドを外部からのアクセスを許可する「0.0.0.0」に明示的に設定
+        # ただし、ポートフォワード設定はデフォルトで0.0.0.0にバインドされるため、ここでは省略可能
+        ports:
+          - "{{ nginx_port }}:80"
+        state: started
+
+    # 2. URIモジュールを使ったポーリング (Nginxの起動待機)
+    - name: Nginxが応答するまで待機 (ヘルスチェック)
+      ansible.builtin.uri:
+        url: "{{ nginx_url }}" # 外部IPでアクセス
+        method: GET
+        status_code: 200 # 期待するステータスコード
+        validate_certs: false
+      register: result_check
+      # until/retries/delayでポーリング動作を定義
+      until: result_check.status == 200
+      retries: "{{ retry_count }}"
+      delay: "{{ retry_delay }}"
+
+    # 3. 最終的な応答ヘッダーの表示 (curl -I に相当)
+    - name: 応答ヘッダーの確認
+      ansible.builtin.debug:
+        msg: "Nginxが正常に応答しました。アクセスURL: {{ nginx_url }}, HTTPステータス: {{ result_check.status }}, サーバー情報: {{ result_check.server }}"
+
+- name: コンテナのクリーンアップ処理 (停止と削除)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    container_name: nginx_web
+
+  tasks:
+    - name: Nginxコンテナを停止
+      community.docker.docker_container:
+        name: "{{ container_name }}"
+        state: stopped
+
+    - name: Nginxコンテナを削除
+      community.docker.docker_container:
+        name: "{{ container_name }}"
+        state: absent

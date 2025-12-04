@@ -1,0 +1,6 @@
+all:
+  hosts:
+    nginx_web:
+      ansible_connection: local
+      ansible_port: 8080
+      ansible_python_interpreter: /usr/bin/python3
